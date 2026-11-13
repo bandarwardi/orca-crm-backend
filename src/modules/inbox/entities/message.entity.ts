@@ -21,6 +21,7 @@ export enum MessageContentType {
   DOCUMENT = 'document',
   AUDIO = 'audio',
   TEMPLATE = 'template',
+  CALL = 'call',
 }
 
 export enum MessageStatus {

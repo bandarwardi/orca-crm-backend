@@ -13,6 +13,7 @@ import { InboxGateway } from '../inbox/inbox.gateway';
 import { CreateWhatsappAccountDto } from './dto/create-whatsapp-account.dto';
 import { UpdateWhatsappAccountDto } from './dto/update-whatsapp-account.dto';
 import { TestConnectionDto } from './dto/test-connection.dto';
+import { AcceptCallDto, RejectCallDto, EndCallDto } from './dto/whatsapp-call.dto';
 import { convertToOggOpus } from '../../common/utils/audio-converter.util';
 
 export interface WhatsAppSendResult {
@@ -749,6 +750,25 @@ export class WhatsappService {
             await this.processMessageStatus(statusObj.id, statusObj.status);
           }
         }
+
+        // 3. معالجة أحداث المكالمات الواردة عبر WhatsApp Calling API
+        if (value.calls && value.calls.length > 0) {
+          const recipientPhoneId = value.metadata?.phone_number_id;
+          for (const callObj of value.calls) {
+            if (callObj.event === 'call_incoming') {
+              await this.processIncomingCall(callObj, recipientPhoneId);
+            } else if (callObj.event === 'call_ended') {
+              const tenantId = await this.resolveTenantFromPhoneId(recipientPhoneId);
+              if (tenantId) {
+                this.inboxGateway.emitCallEnded(tenantId, {
+                  callId: callObj.id,
+                  duration: callObj.duration,
+                });
+                await this.saveCallRecord(callObj, tenantId, recipientPhoneId);
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -901,5 +921,282 @@ export class WhatsappService {
     }
 
     this.logger.log(`WhatsApp message ${waMsgId} status updated to: ${status}`);
+  }
+
+  /**
+   * استخراج tenantId من phone_number_id
+   */
+  private async resolveTenantFromPhoneId(phoneNumberId?: string): Promise<string | null> {
+    if (!phoneNumberId) return null;
+    const account = await this.accountRepo.findOne({ where: { phone_number_id: phoneNumberId } });
+    if (account?.tenant_id) return account.tenant_id;
+    const anyAccount = await this.accountRepo.findOne({ where: {} });
+    if (anyAccount?.tenant_id) return anyAccount.tenant_id;
+    const anyCustomer = await this.customerRepo.findOne({ where: {} });
+    return anyCustomer?.tenant_id || null;
+  }
+
+  /**
+   * معالجة المكالمة الواردة من واتساب
+   */
+  private async processIncomingCall(callObj: any, phoneNumberId?: string) {
+    const callerPhone = callObj.from || callObj.caller_id || '';
+    const sdpOffer = callObj.session?.sdp || callObj.sdp || '';
+    const callId = callObj.id;
+
+    if (!callerPhone || !callId) {
+      this.logger.warn(`processIncomingCall: missing caller phone or callId. callObj: ${JSON.stringify(callObj)}`);
+      return;
+    }
+
+    const tenantId = await this.resolveTenantFromPhoneId(phoneNumberId);
+    if (!tenantId) {
+      this.logger.warn(`processIncomingCall: could not resolve tenantId for phoneNumberId ${phoneNumberId}`);
+      return;
+    }
+
+    // إيجاد أو إنشاء المحادثة المرتبطة بهذا المتصل
+    const cleanPhone = callerPhone.replace(/[^0-9]/g, '');
+    const phoneWithPlus = `+${cleanPhone}`;
+    let conversation = await this.conversationRepo
+      .createQueryBuilder('c')
+      .where('c.phone_number = :phone OR c.phone_number = :phoneWithPlus OR c.phone_number = :cleanPhone', {
+        phone: callerPhone,
+        phoneWithPlus,
+        cleanPhone,
+      })
+      .andWhere('c.tenant_id = :tenantId', { tenantId })
+      .leftJoinAndSelect('c.customer', 'customer')
+      .getOne();
+
+    if (!conversation) {
+      let customer = await this.customerRepo
+        .createQueryBuilder('cust')
+        .where('cust.tenant_id = :tenantId AND (cust.phone = :phone OR cust.phone = :phoneWithPlus OR cust.phone = :cleanPhone)', {
+          tenantId,
+          phone: callerPhone,
+          phoneWithPlus,
+          cleanPhone,
+        })
+        .getOne();
+
+      if (!customer) {
+        customer = this.customerRepo.create({
+          tenant_id: tenantId,
+          name: `عميل واتساب (${cleanPhone.slice(-4)})`,
+          phone: phoneWithPlus,
+          city: '',
+          state: '',
+          source: 'WhatsApp Call',
+        });
+        await this.customerRepo.save(customer);
+      }
+
+      conversation = this.conversationRepo.create({
+        tenant_id: tenantId,
+        phone_number: phoneWithPlus,
+        customer_id: customer.id,
+        status: ConversationStatus.OPEN,
+        last_message_at: new Date(),
+      });
+      conversation = await this.conversationRepo.save(conversation);
+      conversation.customer = customer;
+    }
+
+    let customerName = `+${cleanPhone}`;
+    if (conversation.customer?.name) {
+      customerName = conversation.customer.name;
+    }
+
+    // إرسال حدث المكالمة الواردة عبر WebSocket للموظفين
+    this.inboxGateway.emitIncomingCall(tenantId, {
+      callId,
+      callerPhone: phoneWithPlus,
+      sdpOffer,
+      conversationId: conversation.id,
+      customerName,
+      phoneNumberId: phoneNumberId || '',
+    });
+
+    this.logger.log(`Incoming WhatsApp call from ${phoneWithPlus}, callId: ${callId}`);
+  }
+
+  /**
+   * قبول مكالمة واردة وإرسال SDP Answer لـ Meta
+   */
+  async acceptCall(dto: AcceptCallDto): Promise<{ success: boolean; error?: string }> {
+    const credentials = await this.resolveCredentials({ phoneNumberId: dto.phoneNumberId });
+    if (!credentials) {
+      return { success: false, error: 'لا توجد بيانات اعتماد للحساب' };
+    }
+
+    const apiVersion = this.configService.get<string>('WHATSAPP_API_VERSION') || 'v22.0';
+
+    try {
+      // الخطوة 1: pre_accept
+      const preAcceptUrl = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
+      const preAcceptRes = await fetch(preAcceptUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${credentials.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          call_id: dto.callId,
+          action: 'pre_accept',
+        }),
+      });
+
+      if (!preAcceptRes.ok) {
+        const err = await preAcceptRes.json();
+        this.logger.error(`pre_accept failed: ${JSON.stringify(err)}`);
+      }
+
+      // الخطوة 2: accept مع SDP Answer
+      const acceptUrl = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
+      const acceptRes = await fetch(acceptUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${credentials.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          call_id: dto.callId,
+          action: 'accept',
+          sdp_answer: dto.sdpAnswer,
+        }),
+      });
+
+      if (!acceptRes.ok) {
+        const err = await acceptRes.json();
+        this.logger.error(`accept call failed: ${JSON.stringify(err)}`);
+        return { success: false, error: err?.error?.message || 'فشل قبول المكالمة في Meta' };
+      }
+
+      this.logger.log(`Call accepted successfully: ${dto.callId}`);
+      return { success: true };
+    } catch (err: any) {
+      this.logger.error(`Exception accepting call: ${err?.message}`);
+      return { success: false, error: err?.message };
+    }
+  }
+
+  /**
+   * رفض مكالمة واردة
+   */
+  async rejectCall(dto: RejectCallDto): Promise<{ success: boolean; error?: string }> {
+    const credentials = await this.resolveCredentials({ phoneNumberId: dto.phoneNumberId });
+    if (!credentials) {
+      return { success: false, error: 'لا توجد بيانات اعتماد للحساب' };
+    }
+
+    const apiVersion = this.configService.get<string>('WHATSAPP_API_VERSION') || 'v22.0';
+
+    try {
+      const url = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${credentials.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          call_id: dto.callId,
+          action: 'reject',
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        this.logger.error(`reject call failed: ${JSON.stringify(err)}`);
+        return { success: false, error: err?.error?.message || 'فشل رفض المكالمة' };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      this.logger.error(`Exception rejecting call: ${err?.message}`);
+      return { success: false, error: err?.message };
+    }
+  }
+
+  /**
+   * إنهاء مكالمة نشطة
+   */
+  async endCall(dto: EndCallDto): Promise<{ success: boolean; error?: string }> {
+    const credentials = await this.resolveCredentials({ phoneNumberId: dto.phoneNumberId });
+    if (!credentials) {
+      return { success: false, error: 'لا توجد بيانات اعتماد للحساب' };
+    }
+
+    const apiVersion = this.configService.get<string>('WHATSAPP_API_VERSION') || 'v22.0';
+
+    try {
+      const url = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${credentials.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          call_id: dto.callId,
+          action: 'terminate',
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        this.logger.error(`end call failed: ${JSON.stringify(err)}`);
+        return { success: false, error: err?.error?.message || 'فشل إنهاء المكالمة' };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      this.logger.error(`Exception ending call: ${err?.message}`);
+      return { success: false, error: err?.message };
+    }
+  }
+
+  /**
+   * حفظ سجل المكالمة في قاعدة البيانات بعد انتهائها
+   */
+  private async saveCallRecord(callObj: any, tenantId: string, phoneNumberId?: string) {
+    try {
+      const callerPhone = callObj.from || callObj.caller_id || '';
+      const cleanPhone = callerPhone.replace(/[^0-9]/g, '');
+      const phoneWithPlus = `+${cleanPhone}`;
+
+      const conversation = await this.conversationRepo
+        .createQueryBuilder('c')
+        .where('c.phone_number = :phone OR c.phone_number = :phoneWithPlus OR c.phone_number = :cleanPhone', {
+          phone: callerPhone,
+          phoneWithPlus,
+          cleanPhone,
+        })
+        .andWhere('c.tenant_id = :tenantId', { tenantId })
+        .getOne();
+
+      if (!conversation) return;
+
+      const duration = callObj.duration || 0;
+      const callMsg = this.messageRepo.create({
+        tenant_id: tenantId,
+        conversation_id: conversation.id,
+        direction: MessageDirection.INBOUND,
+        content_type: MessageContentType.CALL,
+        content: JSON.stringify({
+          callId: callObj.id,
+          duration,
+          result: duration > 0 ? 'answered' : 'missed',
+        }),
+        status: MessageStatus.DELIVERED,
+        whatsapp_message_id: callObj.id,
+      });
+
+      await this.messageRepo.save(callMsg);
+      this.logger.log(`Call record saved for callId: ${callObj.id}, duration: ${duration}s`);
+    } catch (err: any) {
+      this.logger.error(`Error saving call record: ${err?.message}`);
+    }
   }
 }

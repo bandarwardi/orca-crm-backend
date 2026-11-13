@@ -77,4 +77,32 @@ export class InboxGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     this.server.to(`tenant_${tenantId}`).emit('message_status_updated', data);
   }
+
+  /**
+   * يبث حدث مكالمة واردة لجميع العملاء في غرفة المستأجر
+   */
+  emitIncomingCall(
+    tenantId: string,
+    data: {
+      callId: string;
+      callerPhone: string;
+      sdpOffer: string;
+      conversationId: string;
+      customerName: string;
+      phoneNumberId: string;
+    },
+  ) {
+    this.logger.log(`Emitting call_incoming to tenant_${tenantId}, callId: ${data.callId}`);
+    this.server.to(`tenant_${tenantId}`).emit('call_incoming', data);
+  }
+
+  /**
+   * يبث حدث انتهاء المكالمة لجميع العملاء في غرفة المستأجر
+   */
+  emitCallEnded(
+    tenantId: string,
+    data: { callId: string; duration?: number },
+  ) {
+    this.server.to(`tenant_${tenantId}`).emit('call_ended', data);
+  }
 }

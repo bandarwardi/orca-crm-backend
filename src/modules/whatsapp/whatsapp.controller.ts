@@ -22,6 +22,7 @@ import { SendWhatsappMessageDto } from './dto/send-whatsapp-message.dto';
 import { CreateWhatsappAccountDto } from './dto/create-whatsapp-account.dto';
 import { UpdateWhatsappAccountDto } from './dto/update-whatsapp-account.dto';
 import { TestConnectionDto } from './dto/test-connection.dto';
+import { AcceptCallDto, RejectCallDto, EndCallDto } from './dto/whatsapp-call.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { TenantId } from '../../common/decorators/tenant-id.decorator';
 
@@ -157,5 +158,32 @@ export class WhatsappController {
   @ApiOperation({ summary: 'اختبار صحة الاتصال مع خوادم Meta لرقم محدد قبل الحفظ' })
   async testConnection(@Body() dto: TestConnectionDto) {
     return this.whatsappService.testConnection(dto);
+  }
+
+  @Post('calls/accept')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'قبول مكالمة واتساب واردة والرد عليها (WebRTC SDP Answer)' })
+  @ApiResponse({ status: 200, description: 'تم قبول المكالمة بنجاح' })
+  async acceptCall(@Body() dto: AcceptCallDto) {
+    return this.whatsappService.acceptCall(dto);
+  }
+
+  @Post('calls/reject')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'رفض مكالمة واتساب واردة' })
+  @ApiResponse({ status: 200, description: 'تم رفض المكالمة' })
+  async rejectCall(@Body() dto: RejectCallDto) {
+    return this.whatsappService.rejectCall(dto);
+  }
+
+  @Post('calls/end')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'إنهاء مكالمة واتساب نشطة' })
+  @ApiResponse({ status: 200, description: 'تم إنهاء المكالمة' })
+  async endCall(@Body() dto: EndCallDto) {
+    return this.whatsappService.endCall(dto);
   }
 }
