@@ -754,10 +754,25 @@ export class WhatsappService {
         // 3. معالجة أحداث المكالمات الواردة عبر WhatsApp Calling API
         if (value.calls && value.calls.length > 0) {
           const recipientPhoneId = value.metadata?.phone_number_id;
+          const callerContact = value.contacts?.[0];
+          this.logger.log(`Received WhatsApp Calls webhook: ${JSON.stringify(value.calls)}`);
+
           for (const callObj of value.calls) {
-            if (callObj.event === 'call_incoming') {
-              await this.processIncomingCall(callObj, recipientPhoneId);
-            } else if (callObj.event === 'call_ended') {
+            const isConnect =
+              callObj.status === 'connect' ||
+              callObj.status === 'ringing' ||
+              callObj.event === 'call_incoming' ||
+              (callObj.direction === 'INBOUND' && (callObj.session?.sdp || callObj.sdp));
+
+            const isEnded =
+              callObj.status === 'terminate' ||
+              callObj.status === 'terminated' ||
+              callObj.status === 'ended' ||
+              callObj.event === 'call_ended';
+
+            if (isConnect) {
+              await this.processIncomingCall(callObj, recipientPhoneId, callerContact);
+            } else if (isEnded) {
               const tenantId = await this.resolveTenantFromPhoneId(recipientPhoneId);
               if (tenantId) {
                 this.inboxGateway.emitCallEnded(tenantId, {
@@ -939,13 +954,18 @@ export class WhatsappService {
   /**
    * معالجة المكالمة الواردة من واتساب
    */
-  private async processIncomingCall(callObj: any, phoneNumberId?: string) {
-    const callerPhone = callObj.from || callObj.caller_id || '';
+  private async processIncomingCall(callObj: any, phoneNumberId?: string, contact?: any) {
+    const callerPhone =
+      callObj.from ||
+      callObj.caller_id ||
+      contact?.wa_id ||
+      contact?.phone_number ||
+      '';
     const sdpOffer = callObj.session?.sdp || callObj.sdp || '';
     const callId = callObj.id;
 
     if (!callerPhone || !callId) {
-      this.logger.warn(`processIncomingCall: missing caller phone or callId. callObj: ${JSON.stringify(callObj)}`);
+      this.logger.warn(`processIncomingCall: missing caller phone or callId. callObj: ${JSON.stringify(callObj)}, contact: ${JSON.stringify(contact)}`);
       return;
     }
 
@@ -970,6 +990,7 @@ export class WhatsappService {
       .getOne();
 
     if (!conversation) {
+      const contactProfileName = contact?.profile?.name || `عميل واتساب (${cleanPhone.slice(-4)})`;
       let customer = await this.customerRepo
         .createQueryBuilder('cust')
         .where('cust.tenant_id = :tenantId AND (cust.phone = :phone OR cust.phone = :phoneWithPlus OR cust.phone = :cleanPhone)', {
@@ -983,7 +1004,7 @@ export class WhatsappService {
       if (!customer) {
         customer = this.customerRepo.create({
           tenant_id: tenantId,
-          name: `عميل واتساب (${cleanPhone.slice(-4)})`,
+          name: contactProfileName,
           phone: phoneWithPlus,
           city: '',
           state: '',
@@ -1006,6 +1027,8 @@ export class WhatsappService {
     let customerName = `+${cleanPhone}`;
     if (conversation.customer?.name) {
       customerName = conversation.customer.name;
+    } else if (contact?.profile?.name) {
+      customerName = contact.profile.name;
     }
 
     // إرسال حدث المكالمة الواردة عبر WebSocket للموظفين
