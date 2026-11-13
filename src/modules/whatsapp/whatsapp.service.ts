@@ -1141,6 +1141,7 @@ export class WhatsappService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          messaging_product: 'whatsapp',
           call_id: dto.callId,
           action: 'pre_accept',
         }),
@@ -1160,6 +1161,7 @@ export class WhatsappService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          messaging_product: 'whatsapp',
           call_id: dto.callId,
           action: 'accept',
           sdp_answer: dto.sdpAnswer,
@@ -1200,6 +1202,7 @@ export class WhatsappService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          messaging_product: 'whatsapp',
           call_id: dto.callId,
           action: 'reject',
         }),
@@ -1238,6 +1241,7 @@ export class WhatsappService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          messaging_product: 'whatsapp',
           call_id: dto.callId,
           action: 'terminate',
         }),
