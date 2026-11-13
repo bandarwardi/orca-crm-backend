@@ -22,7 +22,7 @@ import { SendWhatsappMessageDto } from './dto/send-whatsapp-message.dto';
 import { CreateWhatsappAccountDto } from './dto/create-whatsapp-account.dto';
 import { UpdateWhatsappAccountDto } from './dto/update-whatsapp-account.dto';
 import { TestConnectionDto } from './dto/test-connection.dto';
-import { AcceptCallDto, RejectCallDto, EndCallDto } from './dto/whatsapp-call.dto';
+import { AcceptCallDto, RejectCallDto, EndCallDto, InitiateCallDto } from './dto/whatsapp-call.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { TenantId } from '../../common/decorators/tenant-id.decorator';
 
@@ -158,6 +158,15 @@ export class WhatsappController {
   @ApiOperation({ summary: 'اختبار صحة الاتصال مع خوادم Meta لرقم محدد قبل الحفظ' })
   async testConnection(@Body() dto: TestConnectionDto) {
     return this.whatsappService.testConnection(dto);
+  }
+
+  @Post('calls/initiate')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'بدء مكالمة واتساب صادرة إلى العميل' })
+  @ApiResponse({ status: 200, description: 'تم إرسال طلب الاتصال إلى Meta' })
+  async initiateCall(@TenantId() tenantId: string, @Body() dto: InitiateCallDto) {
+    return this.whatsappService.initiateCall(dto, tenantId);
   }
 
   @Post('calls/accept')

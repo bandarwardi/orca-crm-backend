@@ -13,7 +13,7 @@ import { InboxGateway } from '../inbox/inbox.gateway';
 import { CreateWhatsappAccountDto } from './dto/create-whatsapp-account.dto';
 import { UpdateWhatsappAccountDto } from './dto/update-whatsapp-account.dto';
 import { TestConnectionDto } from './dto/test-connection.dto';
-import { AcceptCallDto, RejectCallDto, EndCallDto } from './dto/whatsapp-call.dto';
+import { AcceptCallDto, RejectCallDto, EndCallDto, InitiateCallDto } from './dto/whatsapp-call.dto';
 import { convertToOggOpus } from '../../common/utils/audio-converter.util';
 
 export interface WhatsAppSendResult {
@@ -1019,6 +1019,68 @@ export class WhatsappService {
     });
 
     this.logger.log(`Incoming WhatsApp call from ${phoneWithPlus}, callId: ${callId}`);
+  }
+
+  /**
+   * بدء مكالمة واتساب صادرة إلى العميل
+   */
+  async initiateCall(
+    dto: InitiateCallDto,
+    tenantId?: string,
+  ): Promise<{ success: boolean; callId?: string; sdpAnswer?: string; error?: string }> {
+    const cleanTo = dto.to.replace(/[^0-9]/g, '');
+    const credentials = await this.resolveCredentials({
+      phoneNumberId: dto.phoneNumberId,
+      tenantId,
+    });
+
+    if (!credentials) {
+      return { success: false, error: 'لا توجد بيانات اعتماد لحساب واتساب' };
+    }
+
+    const { accessToken, phoneNumberId } = credentials;
+    const apiVersion = this.configService.get<string>('WHATSAPP_API_VERSION') || 'v22.0';
+    const url = `https://graph.facebook.com/${apiVersion}/${phoneNumberId}/calls`;
+
+    try {
+      this.logger.log(`Initiating outbound WhatsApp call to ${cleanTo} from ${phoneNumberId}`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: cleanTo,
+          action: 'connect',
+          sdp: dto.sdpOffer,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        this.logger.error(`Failed to initiate WhatsApp call: ${JSON.stringify(data)}`);
+        return {
+          success: false,
+          error: data.error?.message || 'فشل الاتصال عبر Meta (قد يكون الرقم أو الدولة غير مدعومة للمكالمات الصادرة)',
+        };
+      }
+
+      const callId = data.call_id || data.id;
+      const sdpAnswer = data.sdp || data.session?.sdp || data.sdp_answer;
+
+      return {
+        success: true,
+        callId,
+        sdpAnswer,
+      };
+    } catch (err: any) {
+      this.logger.error(`Exception initiating WhatsApp call: ${err?.message}`);
+      return { success: false, error: err?.message || 'خطأ في الاتصال بالخادم' };
+    }
   }
 
   /**

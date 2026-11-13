@@ -1,5 +1,20 @@
-import { IsString } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsOptional } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+export class InitiateCallDto {
+  @ApiProperty({ description: 'رقم هاتف العميل المراد الاتصال به' })
+  @IsString()
+  to: string;
+
+  @ApiPropertyOptional({ description: 'معرف رقم الهاتف في Meta (اختياري)' })
+  @IsOptional()
+  @IsString()
+  phoneNumberId?: string;
+
+  @ApiProperty({ description: 'SDP Offer من المتصفح (WebRTC)' })
+  @IsString()
+  sdpOffer: string;
+}
 
 export class AcceptCallDto {
   @ApiProperty({ description: 'معرف المكالمة من Meta' })
@@ -34,3 +49,4 @@ export class EndCallDto {
   @IsString()
   phoneNumberId: string;
 }
+
