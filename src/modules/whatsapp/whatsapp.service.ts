@@ -765,21 +765,23 @@ export class WhatsappService {
           this.logger.log(`Received WhatsApp Calls webhook: ${JSON.stringify(value.calls)}`);
 
           for (const callObj of value.calls) {
-            const isConnect =
-              callObj.event === 'connect' ||
-              callObj.status === 'connect' ||
-              callObj.status === 'ringing' ||
-              callObj.event === 'call_incoming' ||
-              callObj.direction === 'USER_INITIATED' ||
-              callObj.session?.sdp_type === 'offer' ||
-              Boolean(callObj.session?.sdp);
-
             const isEnded =
               callObj.event === 'terminate' ||
               callObj.status === 'terminate' ||
+              callObj.status === 'COMPLETED' ||
+              callObj.status === 'completed' ||
               callObj.event === 'ended' ||
               callObj.status === 'ended' ||
               callObj.event === 'call_ended';
+
+            const isConnect =
+              !isEnded &&
+              (callObj.event === 'connect' ||
+                callObj.status === 'connect' ||
+                callObj.status === 'ringing' ||
+                callObj.event === 'call_incoming' ||
+                callObj.session?.sdp_type === 'offer' ||
+                Boolean(callObj.session?.sdp));
 
             if (isConnect) {
               await this.processIncomingCall(callObj, recipientPhoneId, callerContact);
