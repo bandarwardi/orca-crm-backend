@@ -217,6 +217,13 @@ export class WhatsappService {
       account = await this.accountRepo.findOne({ where: { id: options.accountId } });
     } else if (options?.phoneNumberId) {
       account = await this.accountRepo.findOne({ where: { phone_number_id: options.phoneNumberId } });
+      if (!account) {
+        account = await this.accountRepo.findOne({
+          where: { is_default: true, status: WhatsAppAccountStatus.ACTIVE },
+        }) || await this.accountRepo.findOne({
+          where: { status: WhatsAppAccountStatus.ACTIVE },
+        }) || await this.accountRepo.findOne({ where: {} });
+      }
     } else if (options?.tenantId) {
       account = await this.accountRepo.findOne({
         where: { tenant_id: options.tenantId, is_default: true, status: WhatsAppAccountStatus.ACTIVE },
@@ -759,14 +766,18 @@ export class WhatsappService {
 
           for (const callObj of value.calls) {
             const isConnect =
+              callObj.event === 'connect' ||
               callObj.status === 'connect' ||
               callObj.status === 'ringing' ||
               callObj.event === 'call_incoming' ||
-              (callObj.direction === 'INBOUND' && (callObj.session?.sdp || callObj.sdp));
+              callObj.direction === 'USER_INITIATED' ||
+              callObj.session?.sdp_type === 'offer' ||
+              Boolean(callObj.session?.sdp);
 
             const isEnded =
+              callObj.event === 'terminate' ||
               callObj.status === 'terminate' ||
-              callObj.status === 'terminated' ||
+              callObj.event === 'ended' ||
               callObj.status === 'ended' ||
               callObj.event === 'call_ended';
 
@@ -990,7 +1001,8 @@ export class WhatsappService {
       .getOne();
 
     if (!conversation) {
-      const contactProfileName = contact?.profile?.name || `عميل واتساب (${cleanPhone.slice(-4)})`;
+      const isDotOrEmpty = !contact?.profile?.name || contact.profile.name.trim() === '.' || contact.profile.name.trim() === '';
+      const contactProfileName = isDotOrEmpty ? `عميل (${cleanPhone.slice(-4)})` : contact.profile.name;
       let customer = await this.customerRepo
         .createQueryBuilder('cust')
         .where('cust.tenant_id = :tenantId AND (cust.phone = :phone OR cust.phone = :phoneWithPlus OR cust.phone = :cleanPhone)', {
@@ -1025,9 +1037,9 @@ export class WhatsappService {
     }
 
     let customerName = `+${cleanPhone}`;
-    if (conversation.customer?.name) {
+    if (conversation.customer?.name && conversation.customer.name.trim() !== '.') {
       customerName = conversation.customer.name;
-    } else if (contact?.profile?.name) {
+    } else if (contact?.profile?.name && contact.profile.name.trim() !== '.') {
       customerName = contact.profile.name;
     }
 
