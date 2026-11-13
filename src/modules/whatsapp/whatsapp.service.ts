@@ -1082,6 +1082,12 @@ export class WhatsappService {
     try {
       this.logger.log(`Initiating outbound WhatsApp call to ${cleanTo} from ${phoneNumberId}`);
 
+      // Ensure uppercase hex for fingerprint as required by Meta media gateway
+      const formattedOffer = (dto.sdpOffer || '').replace(
+        /a=fingerprint:sha-256 (.*)/gi,
+        (_, fp) => `a=fingerprint:sha-256 ${fp.toUpperCase()}`,
+      );
+
       const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -1092,7 +1098,10 @@ export class WhatsappService {
           messaging_product: 'whatsapp',
           to: cleanTo,
           action: 'connect',
-          sdp: dto.sdpOffer,
+          session: {
+            sdp_type: 'offer',
+            sdp: formattedOffer,
+          },
         }),
       });
 
@@ -1131,10 +1140,22 @@ export class WhatsappService {
 
     const apiVersion = this.configService.get<string>('WHATSAPP_API_VERSION') || 'v22.0';
 
+    // Format SDP to ensure uppercase hex for SHA-256 fingerprint required by Meta
+    const formattedAnswer = (dto.sdpAnswer || '').replace(
+      /a=fingerprint:sha-256 (.*)/gi,
+      (_, fp) => `a=fingerprint:sha-256 ${fp.toUpperCase()}`,
+    );
+
+    const session = {
+      sdp_type: 'answer',
+      sdp: formattedAnswer,
+    };
+
+    const callEndpoint = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
+
     try {
       // الخطوة 1: pre_accept
-      const preAcceptUrl = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
-      const preAcceptRes = await fetch(preAcceptUrl, {
+      const preAcceptRes = await fetch(callEndpoint, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${credentials.accessToken}`,
@@ -1144,17 +1165,19 @@ export class WhatsappService {
           messaging_product: 'whatsapp',
           call_id: dto.callId,
           action: 'pre_accept',
+          session,
         }),
       });
 
       if (!preAcceptRes.ok) {
         const err = await preAcceptRes.json();
-        this.logger.error(`pre_accept failed: ${JSON.stringify(err)}`);
+        this.logger.warn(`pre_accept warning: ${JSON.stringify(err)}`);
+      } else {
+        this.logger.log(`pre_accept succeeded for callId: ${dto.callId}`);
       }
 
-      // الخطوة 2: accept مع SDP Answer
-      const acceptUrl = `https://graph.facebook.com/${apiVersion}/${dto.phoneNumberId}/calls`;
-      const acceptRes = await fetch(acceptUrl, {
+      // الخطوة 2: accept مع session
+      const acceptRes = await fetch(callEndpoint, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${credentials.accessToken}`,
@@ -1164,14 +1187,14 @@ export class WhatsappService {
           messaging_product: 'whatsapp',
           call_id: dto.callId,
           action: 'accept',
-          sdp_answer: dto.sdpAnswer,
+          session,
         }),
       });
 
+      const acceptData = await acceptRes.json();
       if (!acceptRes.ok) {
-        const err = await acceptRes.json();
-        this.logger.error(`accept call failed: ${JSON.stringify(err)}`);
-        return { success: false, error: err?.error?.message || 'فشل قبول المكالمة في Meta' };
+        this.logger.error(`accept call failed: ${JSON.stringify(acceptData)}`);
+        return { success: false, error: acceptData?.error?.message || 'فشل قبول المكالمة في Meta' };
       }
 
       this.logger.log(`Call accepted successfully: ${dto.callId}`);
